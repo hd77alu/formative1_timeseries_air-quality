@@ -9,3 +9,5 @@ env/
 .env
 .env.*
 !.env.example
+rf_model.pkl
+rf_model.pkl
