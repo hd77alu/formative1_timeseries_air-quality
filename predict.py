@@ -17,7 +17,7 @@ Usage:
 
     # Optional arguments:
     python predict.py --station Dongsi --timestamp "2015-06-10T14:00:00"
-    python predict.py --source mongo     # fetch from MongoDB endpoint instead of SQL
+    python predict.py --source mongo
     python predict.py --model rf_model.pkl
 """
 
@@ -33,39 +33,53 @@ import requests
 
 
 # ---------------------------------------------------------------------------
-# Configuration defaults
+# Configuration
 # ---------------------------------------------------------------------------
 API_BASE      = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 DEFAULT_MODEL = os.getenv("MODEL_PATH", "rf_model.pkl")
 
-# The feature columns produced by the Task 1C preprocessing pipeline.
-# This list must match exactly what the model was trained on.
+# Exact 41 features the model was trained on — verified from model.feature_names_in_
 FEATURE_COLS = [
-    # Raw pollutants (lag features are the primary input)
-    "PM10", "SO2", "NO2", "CO", "O3",
-    # Weather
+    "SO2", "NO2", "CO", "O3",
     "TEMP", "PRES", "DEWP", "RAIN", "WSPM",
-    # Cyclical time encodings
+    "hour_of_day", "day_of_week",
     "hour_sin", "hour_cos",
     "month_sin", "month_cos",
-    "day_of_week_sin", "day_of_week_cos",
-    # Wind vector components
     "wind_u", "wind_v",
-    # Lag features — target and key pollutants shifted 1 and 2 hours
-    "PM2.5_lag1", "PM2.5_lag2",
-    "SO2_lag1",   "SO2_lag2",
-    "NO2_lag1",   "NO2_lag2",
-    "CO_lag1",    "CO_lag2",
-    "TEMP_lag1",  "TEMP_lag2",
-    "WSPM_lag1",  "WSPM_lag2",
+    "PM2.5_lag_1", "PM2.5_lag_2",
+    "SO2_lag_1",   "SO2_lag_2",
+    "NO2_lag_1",   "NO2_lag_2",
+    "CO_lag_1",    "CO_lag_2",
+    "TEMP_lag_1",  "TEMP_lag_2",
+    "WSPM_lag_1",  "WSPM_lag_2",
+    # One-hot encoded station columns (11 stations — Aotizhongxin is the dropped base)
+    "st_Aotizhongxin",
+    "st_Changping",
+    "st_Dingling",
+    "st_Dongsi",
+    "st_Guanyuan",
+    "st_Gucheng",
+    "st_Huairou",
+    "st_Nongzhanguan",
+    "st_Shunyi",
+    "st_Tiantan",
+    "st_Wanliu",
+    "st_Wanshouxigong",
 ]
 
-# Wind direction string → degrees mapping used during feature engineering
+# All 12 station names used for one-hot encoding
+ALL_STATIONS = [
+    "Aotizhongxin", "Changping", "Dingling", "Dongsi",
+    "Guanyuan", "Gucheng", "Huairou", "Nongzhanguan",
+    "Shunyi", "Tiantan", "Wanliu", "Wanshouxigong",
+]
+
+# Wind direction → degrees
 WD_TO_DEGREES = {
-    "N": 0, "NNE": 22.5, "NE": 45, "ENE": 67.5,
-    "E": 90, "ESE": 112.5, "SE": 135, "SSE": 157.5,
-    "S": 180, "SSW": 202.5, "SW": 225, "WSW": 247.5,
-    "W": 270, "WNW": 292.5, "NW": 315, "NNW": 337.5,
+    "N": 0,   "NNE": 22.5,  "NE": 45,   "ENE": 67.5,
+    "E": 90,  "ESE": 112.5, "SE": 135,  "SSE": 157.5,
+    "S": 180, "SSW": 202.5, "SW": 225,  "WSW": 247.5,
+    "W": 270, "WNW": 292.5, "NW": 315,  "NNW": 337.5,
 }
 
 
@@ -73,16 +87,7 @@ WD_TO_DEGREES = {
 # Step 1 — Fetch a record from the API
 # ---------------------------------------------------------------------------
 def fetch_latest_from_api(source: str) -> dict:
-    """
-    Call the /time-series/latest endpoint on either the SQL or MongoDB backend
-    and return the raw JSON response as a Python dict.
-
-    Args:
-        source: "sql" or "mongo"
-
-    Returns:
-        dict with keys: station, timestamp, pollutants, weather, etc.
-    """
+    """Fetch the most recent record from the SQL or MongoDB latest endpoint."""
     url = f"{API_BASE}/api/v1/{source}/time-series/latest"
     print(f"[Step 1] Fetching latest record from: {url}")
 
@@ -91,11 +96,11 @@ def fetch_latest_from_api(source: str) -> dict:
         response.raise_for_status()
     except requests.exceptions.ConnectionError:
         sys.exit(
-            "\n[ERROR] Could not connect to the API server.\n"
-            "        Make sure it is running:  uvicorn app:app --reload\n"
+            "\n[ERROR] Cannot connect to the API.\n"
+            "        Make sure it is running: uvicorn app:app --reload\n"
         )
     except requests.exceptions.HTTPError as e:
-        sys.exit(f"\n[ERROR] API returned an error: {e}\n")
+        sys.exit(f"\n[ERROR] API error: {e}\n")
 
     data = response.json()
     print(f"         Station   : {data.get('station', data.get('station_name', '?'))}")
@@ -104,181 +109,152 @@ def fetch_latest_from_api(source: str) -> dict:
 
 
 def fetch_by_timestamp_from_api(source: str, station: str, timestamp: str) -> dict:
-    """
-    Fetch a specific record by station + timestamp using the date-range endpoint.
-
-    Args:
-        source:    "sql" or "mongo"
-        station:   Station name e.g. "Dongsi"
-        timestamp: ISO string e.g. "2015-06-10T14:00:00"
-
-    Returns:
-        First matching record as a dict, or exits with an error message.
-    """
+    """Fetch a specific station + timestamp record via the date-range endpoint."""
     url = f"{API_BASE}/api/v1/{source}/time-series/range"
-    params = {
-        "station":    station,
-        "start_date": timestamp,
-        "end_date":   timestamp,
-    }
-    print(f"[Step 1] Fetching record from: {url}")
-    print(f"         Station   : {station}")
-    print(f"         Timestamp : {timestamp}")
+    params = {"station": station, "start_date": timestamp, "end_date": timestamp}
+    print(f"[Step 1] Fetching record — station={station}, timestamp={timestamp}")
 
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
     except requests.exceptions.ConnectionError:
         sys.exit(
-            "\n[ERROR] Could not connect to the API server.\n"
-            "        Make sure it is running:  uvicorn app:app --reload\n"
+            "\n[ERROR] Cannot connect to the API.\n"
+            "        Make sure it is running: uvicorn app:app --reload\n"
         )
 
     results = response.json()
     if not results:
         sys.exit(
-            f"\n[ERROR] No record found for station='{station}' at timestamp='{timestamp}'.\n"
-            f"        Try the --source flag or check the timestamp format (YYYY-MM-DDTHH:MM:SS).\n"
+            f"\n[ERROR] No record found for station='{station}' "
+            f"at timestamp='{timestamp}'.\n"
         )
     return results[0]
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Preprocess the raw API record
+# Step 2 — Preprocess
 # ---------------------------------------------------------------------------
-def _parse_pollutants(record: dict) -> dict:
+def _parse_record(record: dict) -> dict:
     """
-    Extract flat pollutant and weather values from either a SQL or MongoDB
-    API response. Both endpoints return slightly different key structures:
-      - MongoDB: record["pollutants"]["PM2_5"], record["weather"]["TEMP"]
-      - SQL:     record["pm25"], record["temp"]
+    Normalise the API response into a flat dict regardless of whether it
+    came from the MongoDB endpoint (nested pollutants/weather sub-docs)
+    or the SQL endpoint (flat column names).
     """
     flat = {}
 
     if "pollutants" in record:
-        # MongoDB response structure
-        p = record["pollutants"]
-        w = record["weather"]
-        flat["PM2.5"] = p.get("PM2_5")
-        flat["PM10"]  = p.get("PM10")
-        flat["SO2"]   = p.get("SO2")
-        flat["NO2"]   = p.get("NO2")
-        flat["CO"]    = p.get("CO")
-        flat["O3"]    = p.get("O3")
-        flat["TEMP"]  = w.get("TEMP")
-        flat["PRES"]  = w.get("PRES")
-        flat["DEWP"]  = w.get("DEWP")
-        flat["RAIN"]  = w.get("RAIN")
-        flat["wd"]    = w.get("wd")
-        flat["WSPM"]  = w.get("WSPM")
-        flat["year"]  = record.get("year")
-        flat["month"] = record.get("month")
-        flat["day"]   = record.get("day")
-        flat["hour"]  = record.get("hour")
+        # MongoDB structure
+        p, w = record["pollutants"], record["weather"]
+        flat.update({
+            "PM2.5": p.get("PM2_5"), "PM10": p.get("PM10"),
+            "SO2":   p.get("SO2"),   "NO2":  p.get("NO2"),
+            "CO":    p.get("CO"),    "O3":   p.get("O3"),
+            "TEMP":  w.get("TEMP"),  "PRES": w.get("PRES"),
+            "DEWP":  w.get("DEWP"),  "RAIN": w.get("RAIN"),
+            "wd":    w.get("wd"),    "WSPM": w.get("WSPM"),
+            "year":  record.get("year"),  "month": record.get("month"),
+            "day":   record.get("day"),   "hour":  record.get("hour"),
+            "station": record.get("station"),
+        })
     else:
-        # SQL (v_hourly_air_quality view) response structure
-        flat["PM2.5"] = record.get("pm25")
-        flat["PM10"]  = record.get("pm10")
-        flat["SO2"]   = record.get("so2")
-        flat["NO2"]   = record.get("no2")
-        flat["CO"]    = record.get("co")
-        flat["O3"]    = record.get("o3")
-        flat["TEMP"]  = record.get("temp")
-        flat["PRES"]  = record.get("pres")
-        flat["DEWP"]  = record.get("dewp")
-        flat["RAIN"]  = record.get("rain")
-        flat["wd"]    = record.get("wd")
-        flat["WSPM"]  = record.get("wspm")
-        # Parse datetime from observed_at string
-        ts = record.get("observed_at", "2013-01-01T00:00:00")
-        dt = pd.to_datetime(ts)
-        flat["year"]  = dt.year
-        flat["month"] = dt.month
-        flat["day"]   = dt.day
-        flat["hour"]  = dt.hour
+        # SQL (v_hourly_air_quality view) structure
+        ts = pd.to_datetime(record.get("observed_at", "2013-01-01T00:00:00"))
+        flat.update({
+            "PM2.5": record.get("pm25"), "PM10": record.get("pm10"),
+            "SO2":   record.get("so2"),  "NO2":  record.get("no2"),
+            "CO":    record.get("co"),   "O3":   record.get("o3"),
+            "TEMP":  record.get("temp"), "PRES": record.get("pres"),
+            "DEWP":  record.get("dewp"), "RAIN": record.get("rain"),
+            "wd":    record.get("wd"),   "WSPM": record.get("wspm"),
+            "year":  ts.year, "month": ts.month,
+            "day":   ts.day,  "hour":  ts.hour,
+            "station": record.get("station_name"),
+        })
 
     return flat
 
 
 def preprocess(record: dict) -> pd.DataFrame:
     """
-    Apply the same preprocessing pipeline used in Task 1C to a single record.
+    Replicate the exact Task 1C preprocessing pipeline for a single record.
 
-    Since we only have one timestep (no history in the API response), lag
-    features are set to the current value as a best approximation. In a
-    production system you would pass the last N records to compute true lags.
+    Features built:
+    - Raw pollutants (SO2, NO2, CO, O3) and weather variables
+    - hour_of_day, day_of_week (raw integers)
+    - Cyclical hour and month encodings (sin/cos)
+    - Wind U/V vector components
+    - Lag features for PM2.5, SO2, NO2, CO, TEMP, WSPM (lags 1 and 2)
+    - One-hot encoded station columns (st_<StationName>)
 
-    Args:
-        record: Raw dict from the API endpoint
-
-    Returns:
-        Single-row DataFrame with all FEATURE_COLS present and filled
+    Lag values are approximated as the current reading since only one
+    timestep is available from the API response.
     """
     print("\n[Step 2] Preprocessing the record...")
 
-    flat = _parse_pollutants(record)
+    flat = _parse_record(record)
 
-    # ── Cyclical time encodings ─────────────────────────────────────────────
-    hour        = flat.get("hour", 0) or 0
-    month       = flat.get("month", 1) or 1
-    day         = flat.get("day", 1) or 1
-    # Approximate day of week from year/month/day
-    dt          = pd.Timestamp(year=flat["year"], month=month, day=day)
-    day_of_week = dt.dayofweek   # 0 = Monday
+    hour        = int(flat.get("hour")  or 0)
+    month       = int(flat.get("month") or 1)
+    day         = int(flat.get("day")   or 1)
+    year        = int(flat.get("year")  or 2013)
+    dt          = pd.Timestamp(year=year, month=month, day=day)
+    day_of_week = dt.dayofweek  # 0 = Monday
 
+    # ── Wind vector ─────────────────────────────────────────────────────────
+    wd_str  = (flat.get("wd") or "N").strip().upper()
+    degrees = WD_TO_DEGREES.get(wd_str, 0.0)
+    wspm    = float(flat.get("WSPM") or 0.0)
+    wind_u  = wspm * np.sin(np.deg2rad(degrees))
+    wind_v  = wspm * np.cos(np.deg2rad(degrees))
+
+    # ── Build the base feature row ───────────────────────────────────────────
     row = {
-        "PM10":  flat.get("PM10"),
-        "SO2":   flat.get("SO2"),
-        "NO2":   flat.get("NO2"),
-        "CO":    flat.get("CO"),
-        "O3":    flat.get("O3"),
-        "TEMP":  flat.get("TEMP"),
-        "PRES":  flat.get("PRES"),
-        "DEWP":  flat.get("DEWP"),
-        "RAIN":  flat.get("RAIN"),
-        "WSPM":  flat.get("WSPM"),
-        # Cyclical time features
-        "hour_sin":         np.sin(2 * np.pi * hour / 24),
-        "hour_cos":         np.cos(2 * np.pi * hour / 24),
-        "month_sin":        np.sin(2 * np.pi * month / 12),
-        "month_cos":        np.cos(2 * np.pi * month / 12),
-        "day_of_week_sin":  np.sin(2 * np.pi * day_of_week / 7),
-        "day_of_week_cos":  np.cos(2 * np.pi * day_of_week / 7),
+        "SO2":  float(flat.get("SO2")  or 0.0),
+        "NO2":  float(flat.get("NO2")  or 0.0),
+        "CO":   float(flat.get("CO")   or 0.0),
+        "O3":   float(flat.get("O3")   or 0.0),
+        "TEMP": float(flat.get("TEMP") or 0.0),
+        "PRES": float(flat.get("PRES") or 0.0),
+        "DEWP": float(flat.get("DEWP") or 0.0),
+        "RAIN": float(flat.get("RAIN") or 0.0),
+        "WSPM": wspm,
+        # Raw time integers (Task 1C used these directly, not encoded)
+        "hour_of_day": hour,
+        "day_of_week": day_of_week,
+        # Cyclical encodings
+        "hour_sin":  np.sin(2 * np.pi * hour  / 24),
+        "hour_cos":  np.cos(2 * np.pi * hour  / 24),
+        "month_sin": np.sin(2 * np.pi * month / 12),
+        "month_cos": np.cos(2 * np.pi * month / 12),
+        # Wind vectors
+        "wind_u": wind_u,
+        "wind_v": wind_v,
     }
 
-    # ── Wind vector (U/V components) ────────────────────────────────────────
-    wd_str  = flat.get("wd") or "N"
-    degrees = WD_TO_DEGREES.get(wd_str.strip().upper(), 0.0)
-    radians = np.deg2rad(degrees)
-    wspm    = float(flat.get("WSPM") or 0.0)
-    row["wind_u"] = wspm * np.sin(radians)   # east-west component
-    row["wind_v"] = wspm * np.cos(radians)   # north-south component
-
-    # ── Lag features ────────────────────────────────────────────────────────
-    # We only have a single timestep, so lag_1 and lag_2 use the current value.
-    # This is a reasonable approximation for the prediction demo.
-    current_pm25 = flat.get("PM2.5") or 0.0
-    for col, src_val in [
+    # ── Lag features (approximated as current value) ─────────────────────────
+    current_pm25 = float(flat.get("PM2.5") or 0.0)
+    for col, val in [
         ("PM2.5", current_pm25),
-        ("SO2",   flat.get("SO2") or 0.0),
-        ("NO2",   flat.get("NO2") or 0.0),
-        ("CO",    flat.get("CO")  or 0.0),
-        ("TEMP",  flat.get("TEMP") or 0.0),
-        ("WSPM",  flat.get("WSPM") or 0.0),
+        ("SO2",   float(flat.get("SO2")  or 0.0)),
+        ("NO2",   float(flat.get("NO2")  or 0.0)),
+        ("CO",    float(flat.get("CO")   or 0.0)),
+        ("TEMP",  float(flat.get("TEMP") or 0.0)),
+        ("WSPM",  wspm),
     ]:
-        row[f"{col}_lag1"] = src_val
-        row[f"{col}_lag2"] = src_val
+        row[f"{col}_lag_1"] = val
+        row[f"{col}_lag_2"] = val
 
+    # ── One-hot encode station ───────────────────────────────────────────────
+    station = flat.get("station") or ""
+    for s in ALL_STATIONS:
+        row[f"st_{s}"] = 1.0 if station == s else 0.0
+
+    # ── Assemble DataFrame and enforce exact column order ────────────────────
     df = pd.DataFrame([row])
-
-    # ── Fill any remaining NaN with column medians (mirrors Task 1C imputation)
-    df = df.fillna(df.median(numeric_only=True))
-
-    # ── Ensure all expected columns exist in the right order ────────────────
     for col in FEATURE_COLS:
         if col not in df.columns:
             df[col] = 0.0
-
     df = df[FEATURE_COLS]
 
     print(f"         Feature vector shape : {df.shape}")
@@ -287,66 +263,45 @@ def preprocess(record: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — Load the trained model
+# Step 3 — Load the model
 # ---------------------------------------------------------------------------
 def load_model(model_path: str):
-    """
-    Load the saved Random Forest model from a .pkl file using joblib.
-
-    The model is saved at the end of the Task 1C notebook with:
-        import joblib
-        joblib.dump(rf_log, "rf_model.pkl")
-
-    Args:
-        model_path: Path to the .pkl file
-
-    Returns:
-        Loaded sklearn estimator
-    """
+    """Load the saved Random Forest model from disk using joblib."""
     path = Path(model_path)
     if not path.exists():
         sys.exit(
             f"\n[ERROR] Model file not found: {path.resolve()}\n"
-            f"        Save the model in the notebook with:\n"
+            f"        Save it in the notebook with:\n"
             f"            import joblib\n"
             f"            joblib.dump(rf_log, 'rf_model.pkl')\n"
-            f"        Then re-run this script.\n"
         )
 
     print(f"\n[Step 3] Loading model from: {path.resolve()}")
     model = joblib.load(path)
-    print(f"         Model type : {type(model).__name__}")
+    print(f"         Model type   : {type(model).__name__}")
+    print(f"         Features     : {len(model.feature_names_in_)}")
     return model
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — Make and print the prediction
+# Step 4 — Predict and print
 # ---------------------------------------------------------------------------
 def predict(model, features: pd.DataFrame, record: dict) -> None:
     """
-    Run the model on the preprocessed feature vector and print the result.
+    Run the model and print the PM2.5 prediction.
 
-    The Task 1C champion model (Experiment 2) was trained on log1p(PM2.5),
-    so we apply np.expm1() to reverse the transformation.
-
-    Args:
-        model:    Loaded sklearn estimator
-        features: Single-row DataFrame from preprocess()
-        record:   Original API response (for context printing)
+    The model was trained on log1p(PM2.5), so we reverse with np.expm1().
     """
     print("\n[Step 4] Running prediction...")
 
-    # Predict — model was trained on log1p(PM2.5), so reverse with expm1
-    log_pred = model.predict(features)[0]
+    log_pred  = model.predict(features)[0]
     pm25_pred = float(np.expm1(log_pred))
 
-    # Pull the station and timestamp for display
     station   = record.get("station", record.get("station_name", "Unknown"))
     timestamp = record.get("timestamp", record.get("observed_at", "Unknown"))
 
-    # WHO 24-hour PM2.5 guideline is 15 µg/m³
-    who_guideline = 15.0
-    status = "✅ Below WHO guideline" if pm25_pred <= who_guideline else "⚠️  Above WHO guideline"
+    who_limit = 15.0
+    status    = "✅ Below WHO guideline" if pm25_pred <= who_limit else "⚠️  Above WHO guideline"
 
     print()
     print("=" * 55)
@@ -355,7 +310,7 @@ def predict(model, features: pd.DataFrame, record: dict) -> None:
     print(f"  Station           : {station}")
     print(f"  Timestamp         : {timestamp}")
     print(f"  Predicted PM2.5   : {pm25_pred:.2f} µg/m³")
-    print(f"  WHO 24-hr limit   : {who_guideline} µg/m³")
+    print(f"  WHO 24-hr limit   : {who_limit} µg/m³")
     print(f"  Status            : {status}")
     print("=" * 55)
     print()
@@ -366,31 +321,23 @@ def predict(model, features: pd.DataFrame, record: dict) -> None:
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Beijing Air Quality — End-to-End PM2.5 Prediction Script (Task 4)"
+        description="Beijing Air Quality — PM2.5 Prediction Script (Task 4)"
     )
     parser.add_argument(
-        "--source",
-        choices=["sql", "mongo"],
-        default="mongo",
-        help="Which API backend to fetch from (default: mongo)",
+        "--source", choices=["sql", "mongo"], default="mongo",
+        help="API backend to fetch from (default: mongo)",
     )
     parser.add_argument(
-        "--station",
-        type=str,
-        default=None,
-        help="Station name to fetch (optional; fetches latest if omitted)",
+        "--station", type=str, default=None,
+        help="Station name (optional; fetches latest if omitted)",
     )
     parser.add_argument(
-        "--timestamp",
-        type=str,
-        default=None,
-        help="Specific timestamp to fetch e.g. '2015-06-10T14:00:00' (requires --station)",
+        "--timestamp", type=str, default=None,
+        help="ISO timestamp e.g. '2015-06-10T14:00:00' (requires --station)",
     )
     parser.add_argument(
-        "--model",
-        type=str,
-        default=DEFAULT_MODEL,
-        help=f"Path to saved model .pkl file (default: {DEFAULT_MODEL})",
+        "--model", type=str, default=DEFAULT_MODEL,
+        help=f"Path to model .pkl file (default: {DEFAULT_MODEL})",
     )
     args = parser.parse_args()
 
@@ -401,19 +348,19 @@ def main():
     print(f"  Model file  : {args.model}")
     print("=" * 55)
 
-    # ── Step 1: Fetch from API ───────────────────────────────────────────────
+    # Step 1
     if args.station and args.timestamp:
         record = fetch_by_timestamp_from_api(args.source, args.station, args.timestamp)
     else:
         record = fetch_latest_from_api(args.source)
 
-    # ── Step 2: Preprocess ──────────────────────────────────────────────────
+    # Step 2
     features = preprocess(record)
 
-    # ── Step 3: Load model ──────────────────────────────────────────────────
+    # Step 3
     model = load_model(args.model)
 
-    # ── Step 4: Predict ─────────────────────────────────────────────────────
+    # Step 4
     predict(model, features, record)
 
 
