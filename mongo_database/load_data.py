@@ -6,8 +6,8 @@ Expected flow:
 3. Run this script from the repo root:
        python mongo_database/load_data.py
 
-The script inserts all 420,768 documents across 12 stations.
-Re-running is safe — the deterministic _id causes duplicates to be skipped silently.
+The script inserts all 420,768 documents across 12 stations. Re-running is
+safe: the deterministic _id causes duplicates to be skipped.
 """
 
 from __future__ import annotations
@@ -21,10 +21,6 @@ import pandas as pd
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import BulkWriteError
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def load_dotenv_file(dotenv_path: Path) -> None:
     """Read a .env file and set variables that are not already in os.environ."""
@@ -66,7 +62,6 @@ def clean(value) -> float | None:
 
 def row_to_doc(row) -> dict:
     """Convert a single DataFrame row into the target MongoDB document schema."""
-    # row is a Series from iterrows() — use dict-style string access
     ts = (
         f"{int(row['year']):04d}-{int(row['month']):02d}-"
         f"{int(row['day']):02d}T{int(row['hour']):02d}:00:00"
@@ -99,10 +94,6 @@ def row_to_doc(row) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Core loading logic
-# ---------------------------------------------------------------------------
-
 def load_csvs(data_dir: Path) -> pd.DataFrame:
     """Read and concatenate all 12 station CSV files into one DataFrame."""
     csv_files = sorted(data_dir.glob("PRSA_Data_*.csv"))
@@ -121,8 +112,8 @@ def load_csvs(data_dir: Path) -> pd.DataFrame:
 
 
 def create_indexes(collection) -> None:
-    """Create the three indexes required for query performance."""
-    # Drop any stale non-_id indexes so re-runs are safe
+    """Create the three indexes used by the analytical queries."""
+    # drop stale non-_id indexes so re-runs start clean
     for idx in collection.list_indexes():
         if idx["name"] != "_id_":
             collection.drop_index(idx["name"])
@@ -142,7 +133,6 @@ def create_indexes(collection) -> None:
 
 def insert_documents(collection, df: pd.DataFrame, chunk_size: int) -> None:
     """Convert DataFrame rows to documents and insert in batches."""
-    # FIX: Use iterrows() instead of itertuples() to preserve string column access
     docs = [row_to_doc(row) for _, row in df.iterrows()]
 
     inserted = 0
@@ -154,7 +144,7 @@ def insert_documents(collection, df: pd.DataFrame, chunk_size: int) -> None:
             result = collection.insert_many(batch, ordered=False)
             inserted += len(result.inserted_ids)
         except BulkWriteError as exc:
-            # Duplicate key errors are expected on re-runs — count them as skipped
+            # duplicate keys are expected on re-runs; count them as skipped
             write_errors = exc.details.get("writeErrors", [])
             dupes = sum(1 for e in write_errors if e.get("code") == 11000)
             inserted += len(batch) - dupes
@@ -167,10 +157,6 @@ def insert_documents(collection, df: pd.DataFrame, chunk_size: int) -> None:
     print(f"Skipped  : {skipped:,}  (duplicates from prior runs)")
     print(f"Total    : {inserted + skipped:,}")
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -190,7 +176,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Load credentials from .env files (mirrors mysql_database approach)
     project_root = Path(__file__).resolve().parent.parent
     load_dotenv_file(project_root / ".env")
     load_dotenv_file(Path(__file__).resolve().parent / ".env")
@@ -206,27 +191,22 @@ def main() -> int:
     if not args.data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {args.data_dir}")
 
-    # Connect
     client     = MongoClient(mongo_uri)
     db         = client["beijing_air_quality"]
     collection = db["air_quality_readings"]
     client.admin.command("ping")
-    print(f"Connected to MongoDB Atlas — database: {db.name}\n")
+    print(f"Connected to MongoDB Atlas, database: {db.name}\n")
 
-    # Load
     df = load_csvs(args.data_dir)
 
-    # Index
     print()
     create_indexes(collection)
 
-    # Insert
     print()
     insert_documents(collection, df, args.chunk_size)
 
-    # Verify
     total = collection.count_documents({})
-    print(f"\nVerification — documents in collection: {total:,}")
+    print(f"\nDocuments in collection: {total:,}")
     print("Load complete.")
 
     client.close()

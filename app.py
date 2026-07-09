@@ -1,23 +1,13 @@
-"""
-Beijing Air Quality — Unified API Gateway
-Task 3 | Group 5 | African Leadership University
+"""Unified API gateway for the Beijing air quality project (Task 3, Group 5).
 
-Provides full CRUD and time-series endpoints for both MySQL and MongoDB backends.
-All environment variables are read from a .env file or the shell environment.
+Serves CRUD and time-series endpoints for both the MySQL and MongoDB backends.
+Reads MONGO_URI, MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD and
+MYSQL_DATABASE from a .env file or the shell environment.
 
-Required environment variables:
-    MONGO_URI        — MongoDB Atlas connection string
-    MYSQL_HOST       — MySQL host (default: 127.0.0.1)
-    MYSQL_PORT       — MySQL port (default: 3306)
-    MYSQL_USER       — MySQL username
-    MYSQL_PASSWORD   — MySQL password
-    MYSQL_DATABASE   — MySQL database name (default: beijing_air_quality)
-
-Run:
+Run with:
     uvicorn app:app --reload
 
-Docs:
-    http://127.0.0.1:8000/docs
+Interactive docs at http://127.0.0.1:8000/docs
 """
 
 import os
@@ -31,9 +21,6 @@ from pymongo import MongoClient, ASCENDING, DESCENDING
 from pydantic import BaseModel
 
 
-# ---------------------------------------------------------------------------
-# 0. Load .env file (simple parser — no external dependency needed)
-# ---------------------------------------------------------------------------
 def _load_dotenv() -> None:
     """Read a .env file from the project root and set variables into os.environ."""
     for candidate in [Path(__file__).parent / ".env", Path(".env")]:
@@ -53,11 +40,6 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 
-# ---------------------------------------------------------------------------
-# 1. Database connections
-# ---------------------------------------------------------------------------
-
-# ── MongoDB ─────────────────────────────────────────────────────────────────
 _MONGO_URI = os.getenv("MONGO_URI", "")
 if not _MONGO_URI:
     raise RuntimeError(
@@ -68,7 +50,6 @@ _mongo_client = MongoClient(_MONGO_URI)
 _mongo_col = _mongo_client["beijing_air_quality"]["air_quality_readings"]
 
 
-# ── MySQL ────────────────────────────────────────────────────────────────────
 def _mysql_cfg() -> dict:
     """Return a fresh mysql.connector connection config dict."""
     return {
@@ -90,10 +71,6 @@ def _mysql():
     finally:
         conn.close()
 
-
-# ---------------------------------------------------------------------------
-# 2. Pydantic schemas
-# ---------------------------------------------------------------------------
 
 class Pollutants(BaseModel):
     PM2_5: Optional[float] = None
@@ -124,12 +101,8 @@ class AirQualityRecord(BaseModel):
     weather:    Weather
 
 
-# ---------------------------------------------------------------------------
-# 3. FastAPI app
-# ---------------------------------------------------------------------------
-
 app = FastAPI(
-    title="Beijing Air Quality — Unified API Gateway",
+    title="Beijing Air Quality API",
     description=(
         "Full CRUD and time-series endpoints for both MySQL and MongoDB backends. "
         "SQL endpoints operate on the normalised v_hourly_air_quality view. "
@@ -139,11 +112,8 @@ app = FastAPI(
 )
 
 
-# ---------------------------------------------------------------------------
-# 4. Helper — serialise a MySQL row dict so JSON can handle Decimal / datetime
-# ---------------------------------------------------------------------------
 def _sql_row_to_dict(row: dict) -> dict:
-    """Convert Decimal and datetime types to JSON-safe Python primitives."""
+    """Convert Decimal and datetime values in a MySQL row to JSON-safe types."""
     result = {}
     for k, v in row.items():
         if hasattr(v, "__float__"):   # Decimal
@@ -155,10 +125,6 @@ def _sql_row_to_dict(row: dict) -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
-# 5. Root
-# ---------------------------------------------------------------------------
-
 @app.get("/", tags=["Root"])
 def read_root():
     return {
@@ -168,16 +134,13 @@ def read_root():
     }
 
 
-# ===========================================================================
-# SQL ENDPOINTS
-# ===========================================================================
+# SQL endpoints
 
-@app.post("/api/v1/sql/air-quality", status_code=201, tags=["SQL — CRUD"])
+@app.post("/api/v1/sql/air-quality", status_code=201, tags=["SQL - CRUD"])
 def create_sql_record(record: AirQualityRecord):
-    """
-    CREATE — Insert a new hourly reading into MySQL.
+    """Insert a new hourly reading into MySQL.
 
-    Inserts into stations (if new), observations, air_quality_readings,
+    Writes to stations (if new), observations, air_quality_readings,
     and weather_readings in a single transaction.
     """
     p = record.pollutants
@@ -186,7 +149,8 @@ def create_sql_record(record: AirQualityRecord):
     with _mysql() as conn:
         cur = conn.cursor()
 
-        # 1. Upsert station
+        # LAST_INSERT_ID(station_id) makes lastrowid valid even when the
+        # station already exists
         cur.execute(
             "INSERT INTO stations (station_name, city) VALUES (%s, 'Beijing') "
             "ON DUPLICATE KEY UPDATE station_id = LAST_INSERT_ID(station_id)",
@@ -194,7 +158,6 @@ def create_sql_record(record: AirQualityRecord):
         )
         station_id = cur.lastrowid
 
-        # 2. Insert observation (timestamp is the ISO string, cast to DATETIME)
         try:
             cur.execute(
                 "INSERT INTO observations (station_id, observed_at) VALUES (%s, %s)",
@@ -207,7 +170,6 @@ def create_sql_record(record: AirQualityRecord):
             )
         obs_id = cur.lastrowid
 
-        # 3. Insert pollutant readings
         cur.execute(
             "INSERT INTO air_quality_readings "
             "(observation_id, pm25, pm10, so2, no2, co, o3) "
@@ -215,7 +177,6 @@ def create_sql_record(record: AirQualityRecord):
             (obs_id, p.PM2_5, p.PM10, p.SO2, p.NO2, p.CO, p.O3),
         )
 
-        # 4. Insert weather readings
         cur.execute(
             "INSERT INTO weather_readings "
             "(observation_id, temp, pres, dewp, rain, wd, wspm) "
@@ -228,9 +189,9 @@ def create_sql_record(record: AirQualityRecord):
     return {"message": "Record created successfully.", "observation_id": obs_id}
 
 
-@app.get("/api/v1/sql/air-quality/{record_id}", tags=["SQL — CRUD"])
+@app.get("/api/v1/sql/air-quality/{record_id}", tags=["SQL - CRUD"])
 def get_sql_record(record_id: int = FPath(..., description="observation_id from the observations table")):
-    """READ — Fetch one reading by its observation_id using the v_hourly_air_quality view."""
+    """Fetch one reading by its observation_id from the v_hourly_air_quality view."""
     with _mysql() as conn:
         cur = conn.cursor(dictionary=True)
         cur.execute(
@@ -244,12 +205,12 @@ def get_sql_record(record_id: int = FPath(..., description="observation_id from 
     return _sql_row_to_dict(row)
 
 
-@app.put("/api/v1/sql/air-quality/{record_id}", tags=["SQL — CRUD"])
+@app.put("/api/v1/sql/air-quality/{record_id}", tags=["SQL - CRUD"])
 def update_sql_record(
     record: AirQualityRecord,
     record_id: int = FPath(..., description="observation_id to update"),
 ):
-    """UPDATE — Modify pollutant and weather readings for an existing observation."""
+    """Update pollutant and weather readings for an existing observation."""
     p = record.pollutants
     w = record.weather
 
@@ -285,13 +246,12 @@ def update_sql_record(
     return {"message": "Record updated successfully.", "observation_id": record_id}
 
 
-@app.delete("/api/v1/sql/air-quality/{record_id}", tags=["SQL — CRUD"])
+@app.delete("/api/v1/sql/air-quality/{record_id}", tags=["SQL - CRUD"])
 def delete_sql_record(record_id: int = FPath(..., description="observation_id to delete")):
-    """
-    DELETE — Remove an observation and its readings from MySQL.
+    """Delete an observation from MySQL.
 
     The ON DELETE CASCADE constraints on air_quality_readings and
-    weather_readings mean deleting the observation row is sufficient.
+    weather_readings remove the child rows automatically.
     """
     with _mysql() as conn:
         cur = conn.cursor()
@@ -305,9 +265,9 @@ def delete_sql_record(record_id: int = FPath(..., description="observation_id to
     return {"message": "Record deleted successfully.", "observation_id": record_id}
 
 
-@app.get("/api/v1/sql/time-series/latest", tags=["SQL — Time-Series"])
+@app.get("/api/v1/sql/time-series/latest", tags=["SQL - Time-Series"])
 def get_sql_latest():
-    """TIME-SERIES — Return the most recent observation across all stations."""
+    """Return the most recent observation across all stations."""
     with _mysql() as conn:
         cur = conn.cursor(dictionary=True)
         cur.execute(
@@ -321,16 +281,15 @@ def get_sql_latest():
     return _sql_row_to_dict(row)
 
 
-@app.get("/api/v1/sql/time-series/range", tags=["SQL — Time-Series"])
+@app.get("/api/v1/sql/time-series/range", tags=["SQL - Time-Series"])
 def get_sql_range(
     station: Optional[str] = Query(None, description="Filter by station name (optional)"),
-    start_date: str = Query(..., example="2015-01-01T00:00:00", description="ISO datetime — range start"),
-    end_date:   str = Query(..., example="2015-01-03T23:00:00", description="ISO datetime — range end"),
+    start_date: str = Query(..., example="2015-01-01T00:00:00", description="ISO datetime, range start"),
+    end_date:   str = Query(..., example="2015-01-03T23:00:00", description="ISO datetime, range end"),
 ):
-    """
-    TIME-SERIES — Return all observations within a datetime range.
+    """Return all observations within a datetime range.
 
-    Optionally filter to a single station by supplying the `station` parameter.
+    Optionally filter to a single station with the `station` parameter.
     """
     with _mysql() as conn:
         cur = conn.cursor(dictionary=True)
@@ -355,9 +314,7 @@ def get_sql_range(
     return [_sql_row_to_dict(r) for r in rows]
 
 
-# ===========================================================================
-# MONGODB ENDPOINTS
-# ===========================================================================
+# MongoDB endpoints
 
 def _get_season(month: int) -> str:
     if month in (12, 1, 2):  return "Winter"
@@ -366,12 +323,11 @@ def _get_season(month: int) -> str:
     else:                    return "Autumn"
 
 
-@app.post("/api/v1/mongo/air-quality", status_code=201, tags=["MongoDB — CRUD"])
+@app.post("/api/v1/mongo/air-quality", status_code=201, tags=["MongoDB - CRUD"])
 def create_mongo_record(record: AirQualityRecord):
-    """
-    CREATE — Insert a new document into the MongoDB air_quality_readings collection.
+    """Insert a new document into the air_quality_readings collection.
 
-    Uses the deterministic _id pattern station_timestamp to prevent duplicates.
+    The deterministic _id pattern station_timestamp prevents duplicates.
     """
     ts = record.timestamp.replace(" ", "T")
     doc_id = f"{record.station}_{ts}"
@@ -398,21 +354,21 @@ def create_mongo_record(record: AirQualityRecord):
     return {"message": "Document created successfully.", "_id": doc_id}
 
 
-@app.get("/api/v1/mongo/air-quality/{record_id}", tags=["MongoDB — CRUD"])
+@app.get("/api/v1/mongo/air-quality/{record_id}", tags=["MongoDB - CRUD"])
 def get_mongo_record(
     record_id: str = FPath(
         ..., example="Aotizhongxin_2013-03-01T00:00:00",
         description="Deterministic _id: station_YYYY-MM-DDTHH:MM:SS"
     )
 ):
-    """READ — Fetch one document by its _id."""
+    """Fetch one document by its _id."""
     doc = _mongo_col.find_one({"_id": record_id}, {"_id": 0})
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found.")
     return doc
 
 
-@app.put("/api/v1/mongo/air-quality/{record_id}", tags=["MongoDB — CRUD"])
+@app.put("/api/v1/mongo/air-quality/{record_id}", tags=["MongoDB - CRUD"])
 def update_mongo_record(
     record: AirQualityRecord,
     record_id: str = FPath(
@@ -420,7 +376,7 @@ def update_mongo_record(
         description="_id of the document to update"
     ),
 ):
-    """UPDATE — Replace the pollutant and weather sub-documents of an existing record."""
+    """Replace the pollutant and weather sub-documents of an existing record."""
     result = _mongo_col.update_one(
         {"_id": record_id},
         {"$set": {
@@ -433,40 +389,39 @@ def update_mongo_record(
     return {"message": "Document updated successfully.", "_id": record_id}
 
 
-@app.delete("/api/v1/mongo/air-quality/{record_id}", tags=["MongoDB — CRUD"])
+@app.delete("/api/v1/mongo/air-quality/{record_id}", tags=["MongoDB - CRUD"])
 def delete_mongo_record(
     record_id: str = FPath(
         ..., example="Aotizhongxin_2013-03-01T00:00:00",
         description="_id of the document to delete"
     )
 ):
-    """DELETE — Remove a document from the collection by its _id."""
+    """Delete a document from the collection by its _id."""
     result = _mongo_col.delete_one({"_id": record_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Document not found.")
     return {"message": "Document deleted successfully.", "_id": record_id}
 
 
-@app.get("/api/v1/mongo/time-series/latest", tags=["MongoDB — Time-Series"])
+@app.get("/api/v1/mongo/time-series/latest", tags=["MongoDB - Time-Series"])
 def get_mongo_latest():
-    """TIME-SERIES — Return the most recent document in the collection."""
+    """Return the most recent document in the collection."""
     doc = _mongo_col.find_one({}, sort=[("timestamp", DESCENDING)], projection={"_id": 0})
     if doc is None:
         raise HTTPException(status_code=404, detail="No documents found.")
     return doc
 
 
-@app.get("/api/v1/mongo/time-series/range", tags=["MongoDB — Time-Series"])
+@app.get("/api/v1/mongo/time-series/range", tags=["MongoDB - Time-Series"])
 def get_mongo_range(
     station:    Optional[str] = Query(None, description="Filter by station name (optional)"),
-    start_date: str = Query(..., example="2015-01-01T00:00:00", description="ISO datetime — range start"),
-    end_date:   str = Query(..., example="2015-01-03T23:00:00", description="ISO datetime — range end"),
+    start_date: str = Query(..., example="2015-01-01T00:00:00", description="ISO datetime, range start"),
+    end_date:   str = Query(..., example="2015-01-03T23:00:00", description="ISO datetime, range end"),
 ):
-    """
-    TIME-SERIES — Return all documents within a timestamp range.
+    """Return all documents within a timestamp range.
 
     Optionally filter to a single station. Uses the compound index
-    (station, timestamp) when a station is provided; uses idx_timestamp otherwise.
+    (station, timestamp) when a station is provided, idx_timestamp otherwise.
     """
     query: dict = {"timestamp": {"$gte": start_date, "$lte": end_date}}
     if station:

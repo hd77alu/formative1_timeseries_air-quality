@@ -16,10 +16,6 @@ import pandas as pd
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def load_dotenv_file(dotenv_path: Path) -> None:
     if not dotenv_path.exists():
         return
@@ -41,10 +37,6 @@ def divider(title: str) -> None:
     print(line)
 
 
-# ---------------------------------------------------------------------------
-# Connect
-# ---------------------------------------------------------------------------
-
 project_root = Path(__file__).resolve().parent.parent
 load_dotenv_file(project_root / ".env")
 load_dotenv_file(Path(__file__).resolve().parent / ".env")
@@ -60,23 +52,18 @@ client     = MongoClient(mongo_uri)
 db         = client["beijing_air_quality"]
 collection = db["air_quality_readings"]
 client.admin.command("ping")
-print(f"Connected — database: {db.name}  |  collection: {collection.name}")
+print(f"Connected to database {db.name}, collection {collection.name}")
 print(f"Total documents: {collection.count_documents({}):,}")
 
 
-# ---------------------------------------------------------------------------
-# Query 1 — Latest record in the collection
-# Task 3 pattern: GET /latest
-# Uses idx_timestamp — no full collection scan.
-# ---------------------------------------------------------------------------
+# Query 1: latest record in the collection (uses idx_timestamp)
 
-divider("Query 1 — Latest Record")
+divider("Query 1 - Latest Record")
 
 q1 = collection.find_one({}, sort=[("timestamp", DESCENDING)])
 
-# FIX: Handle empty collection gracefully
 if q1 is None:
-    print("WARNING: Collection is empty — no documents to query.")
+    print("WARNING: Collection is empty, nothing to query.")
     print("Run load_data.py first to populate the database.")
 else:
     print(f"Station   : {q1['station']}")
@@ -87,13 +74,10 @@ else:
     print(f"TEMP      : {q1['weather']['TEMP']}")
 
 
-# ---------------------------------------------------------------------------
-# Query 2 — Records for one station within a date range
-# Task 3 pattern: GET /records?station=&start=&end=
-# Uses compound index idx_station_timestamp — single index range scan.
-# ---------------------------------------------------------------------------
+# Query 2: records for one station within a date range
+# (single range scan on the compound index idx_station_timestamp)
 
-divider("Query 2 — Date Range (Dongsi, 2015-01-01 → 2015-01-03)")
+divider("Query 2 - Date Range (Dongsi, 2015-01-01 to 2015-01-03)")
 
 q2_docs = list(collection.find(
     {
@@ -106,7 +90,7 @@ q2_docs = list(collection.find(
     sort=[("timestamp", ASCENDING)],
 ))
 
-print(f"Documents returned : {len(q2_docs)}  (expected 72 = 3 days × 24 hours)")
+print(f"Documents returned : {len(q2_docs)}  (expected 72 = 3 days x 24 hours)")
 print()
 
 rows = [
@@ -125,12 +109,9 @@ print("First 8 records:")
 print(df_q2.head(8).to_string(index=False))
 
 
-# ---------------------------------------------------------------------------
-# Query 3 — All 12 stations ranked by average PM2.5
-# Aggregation pipeline: $match nulls → $group avg/max → $sort → $project
-# ---------------------------------------------------------------------------
+# Query 3: all 12 stations ranked by average PM2.5
 
-divider("Query 3 — Stations Ranked by Average PM2.5")
+divider("Query 3 - Stations Ranked by Average PM2.5")
 
 q3 = list(collection.aggregate([
     {"$match":   {"pollutants.PM2_5": {"$ne": None}}},
@@ -156,16 +137,12 @@ df_q3.index.name = "rank"
 print(df_q3.to_string())
 
 
-# ---------------------------------------------------------------------------
-# Query 4 — Hazardous pollution events (PM2.5 > 300 µg/m³)
+# Query 4: hazardous pollution events, PM2.5 > 300 ug/m3
+# (idx_pm25 covers the threshold filter)
+
+divider("Query 4 - Hazardous Events (PM2.5 > 300 ug/m3)")
+
 # Part A: hazardous hours per station
-# Part B: 10 single worst readings in the dataset
-# Uses idx_pm25 for the threshold filter.
-# ---------------------------------------------------------------------------
-
-divider("Query 4 — Hazardous Events (PM2.5 > 300 µg/m³)")
-
-# Part A — count per station
 q4a = list(collection.aggregate([
     {"$match":   {"pollutants.PM2_5": {"$gt": 300.0}}},
     {"$group":   {
@@ -182,10 +159,10 @@ q4a = list(collection.aggregate([
     }},
 ]))
 
-print("Part A — Hazardous hours per station:")
+print("Part A: hazardous hours per station")
 print(pd.DataFrame(q4a).to_string(index=False))
 
-# Part B — 10 worst individual readings
+# Part B: 10 worst individual readings
 q4b = list(collection.find(
     {"pollutants.PM2_5": {"$gt": 300.0}},
     {"_id": 0, "station": 1, "timestamp": 1, "pollutants.PM2_5": 1, "weather.TEMP": 1},
@@ -193,16 +170,14 @@ q4b = list(collection.find(
 
 df_q4b = pd.json_normalize(q4b)
 df_q4b.columns = ["station", "timestamp", "PM2_5", "TEMP"]
-print("\nPart B — 10 worst individual readings:")
+print("\nPart B: 10 worst individual readings")
 print(df_q4b.to_string(index=False))
 
 
-# ---------------------------------------------------------------------------
-# Query 5 — Seasonal average PM2.5 across all stations
-# Groups on the pre-computed `season` field inserted by load_data.py.
-# ---------------------------------------------------------------------------
+# Query 5: seasonal average PM2.5 across all stations
+# (groups on the season field pre-computed by load_data.py)
 
-divider("Query 5 — Seasonal Average PM2.5")
+divider("Query 5 - Seasonal Average PM2.5")
 
 q5 = list(collection.aggregate([
     {"$match":   {"pollutants.PM2_5": {"$ne": None}}},
@@ -236,7 +211,7 @@ if q5:
     else:
         print("\nCannot compute winter/summer ratio (missing data or division by zero).")
 else:
-    print("\nNo seasonal data available — collection may be empty.")
+    print("\nNo seasonal data available; collection may be empty.")
 
 print("\nAll queries complete.")
 client.close()

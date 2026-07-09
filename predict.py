@@ -1,21 +1,13 @@
-"""
-Beijing Air Quality — End-to-End Prediction Script
-Task 4 | Group 5 | African Leadership University
+"""End-to-end PM2.5 prediction script (Task 4, Group 5).
 
-This script ties together all four tasks of the pipeline:
+Fetches a time-series record from the Task 3 API, preprocesses it with the
+same pipeline used in Task 1C, loads the trained Random Forest model, and
+prints a PM2.5 prediction.
 
-    Step 1 — Fetch a time-series record from the API       (Task 3)
-    Step 2 — Preprocess it using the Task 1C pipeline      (Task 1C)
-    Step 3 — Load the trained Random Forest model          (Task 1C)
-    Step 4 — Produce and print a PM2.5 prediction
+The API server must be running first: uvicorn app:app --reload
 
 Usage:
-    # Make sure the API server is running first:
-    #   uvicorn app:app --reload
-
     python predict.py
-
-    # Optional arguments:
     python predict.py --station Dongsi --timestamp "2015-06-10T14:00:00"
     python predict.py --source mongo
     python predict.py --model rf_model.pkl
@@ -32,13 +24,10 @@ import pandas as pd
 import requests
 
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 API_BASE      = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 DEFAULT_MODEL = os.getenv("MODEL_PATH", "rf_model.pkl")
 
-# Exact 41 features the model was trained on — verified from model.feature_names_in_
+# Column order must match model.feature_names_in_ exactly
 FEATURE_COLS = [
     "SO2", "NO2", "CO", "O3",
     "TEMP", "PRES", "DEWP", "RAIN", "WSPM",
@@ -52,7 +41,6 @@ FEATURE_COLS = [
     "CO_lag_1",    "CO_lag_2",
     "TEMP_lag_1",  "TEMP_lag_2",
     "WSPM_lag_1",  "WSPM_lag_2",
-    # One-hot encoded station columns (11 stations — Aotizhongxin is the dropped base)
     "st_Aotizhongxin",
     "st_Changping",
     "st_Dingling",
@@ -67,14 +55,14 @@ FEATURE_COLS = [
     "st_Wanshouxigong",
 ]
 
-# All 12 station names used for one-hot encoding
+# Station names used for one-hot encoding
 ALL_STATIONS = [
     "Aotizhongxin", "Changping", "Dingling", "Dongsi",
     "Guanyuan", "Gucheng", "Huairou", "Nongzhanguan",
     "Shunyi", "Tiantan", "Wanliu", "Wanshouxigong",
 ]
 
-# Wind direction → degrees
+# Compass wind direction to degrees
 WD_TO_DEGREES = {
     "N": 0,   "NNE": 22.5,  "NE": 45,   "ENE": 67.5,
     "E": 90,  "ESE": 112.5, "SE": 135,  "SSE": 157.5,
@@ -83,9 +71,6 @@ WD_TO_DEGREES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Step 1 — Fetch a record from the API
-# ---------------------------------------------------------------------------
 def fetch_latest_from_api(source: str) -> dict:
     """Fetch the most recent record from the SQL or MongoDB latest endpoint."""
     url = f"{API_BASE}/api/v1/{source}/time-series/latest"
@@ -112,7 +97,7 @@ def fetch_by_timestamp_from_api(source: str, station: str, timestamp: str) -> di
     """Fetch a specific station + timestamp record via the date-range endpoint."""
     url = f"{API_BASE}/api/v1/{source}/time-series/range"
     params = {"station": station, "start_date": timestamp, "end_date": timestamp}
-    print(f"[Step 1] Fetching record — station={station}, timestamp={timestamp}")
+    print(f"[Step 1] Fetching record: station={station}, timestamp={timestamp}")
 
     try:
         response = requests.get(url, params=params, timeout=10)
@@ -132,14 +117,11 @@ def fetch_by_timestamp_from_api(source: str, station: str, timestamp: str) -> di
     return results[0]
 
 
-# ---------------------------------------------------------------------------
-# Step 2 — Preprocess
-# ---------------------------------------------------------------------------
 def _parse_record(record: dict) -> dict:
-    """
-    Normalise the API response into a flat dict regardless of whether it
-    came from the MongoDB endpoint (nested pollutants/weather sub-docs)
-    or the SQL endpoint (flat column names).
+    """Flatten the API response from either backend into one dict.
+
+    MongoDB responses nest pollutants/weather sub-documents; SQL responses
+    use flat column names from the v_hourly_air_quality view.
     """
     flat = {}
 
@@ -176,19 +158,12 @@ def _parse_record(record: dict) -> dict:
 
 
 def preprocess(record: dict) -> pd.DataFrame:
-    """
-    Replicate the exact Task 1C preprocessing pipeline for a single record.
+    """Apply the Task 1C preprocessing pipeline to a single record.
 
-    Features built:
-    - Raw pollutants (SO2, NO2, CO, O3) and weather variables
-    - hour_of_day, day_of_week (raw integers)
-    - Cyclical hour and month encodings (sin/cos)
-    - Wind U/V vector components
-    - Lag features for PM2.5, SO2, NO2, CO, TEMP, WSPM (lags 1 and 2)
-    - One-hot encoded station columns (st_<StationName>)
-
-    Lag values are approximated as the current reading since only one
-    timestep is available from the API response.
+    Builds the raw pollutant/weather features, cyclical hour and month
+    encodings, wind U/V components, lag features, and one-hot station
+    columns. Lag values are approximated by the current reading since the
+    API response only contains one timestep.
     """
     print("\n[Step 2] Preprocessing the record...")
 
@@ -201,14 +176,12 @@ def preprocess(record: dict) -> pd.DataFrame:
     dt          = pd.Timestamp(year=year, month=month, day=day)
     day_of_week = dt.dayofweek  # 0 = Monday
 
-    # ── Wind vector ─────────────────────────────────────────────────────────
     wd_str  = (flat.get("wd") or "N").strip().upper()
     degrees = WD_TO_DEGREES.get(wd_str, 0.0)
     wspm    = float(flat.get("WSPM") or 0.0)
     wind_u  = wspm * np.sin(np.deg2rad(degrees))
     wind_v  = wspm * np.cos(np.deg2rad(degrees))
 
-    # ── Build the base feature row ───────────────────────────────────────────
     row = {
         "SO2":  float(flat.get("SO2")  or 0.0),
         "NO2":  float(flat.get("NO2")  or 0.0),
@@ -219,20 +192,17 @@ def preprocess(record: dict) -> pd.DataFrame:
         "DEWP": float(flat.get("DEWP") or 0.0),
         "RAIN": float(flat.get("RAIN") or 0.0),
         "WSPM": wspm,
-        # Raw time integers (Task 1C used these directly, not encoded)
         "hour_of_day": hour,
         "day_of_week": day_of_week,
-        # Cyclical encodings
         "hour_sin":  np.sin(2 * np.pi * hour  / 24),
         "hour_cos":  np.cos(2 * np.pi * hour  / 24),
         "month_sin": np.sin(2 * np.pi * month / 12),
         "month_cos": np.cos(2 * np.pi * month / 12),
-        # Wind vectors
         "wind_u": wind_u,
         "wind_v": wind_v,
     }
 
-    # ── Lag features (approximated as current value) ─────────────────────────
+    # Lag features, approximated by the current values
     current_pm25 = float(flat.get("PM2.5") or 0.0)
     for col, val in [
         ("PM2.5", current_pm25),
@@ -245,12 +215,10 @@ def preprocess(record: dict) -> pd.DataFrame:
         row[f"{col}_lag_1"] = val
         row[f"{col}_lag_2"] = val
 
-    # ── One-hot encode station ───────────────────────────────────────────────
     station = flat.get("station") or ""
     for s in ALL_STATIONS:
         row[f"st_{s}"] = 1.0 if station == s else 0.0
 
-    # ── Assemble DataFrame and enforce exact column order ────────────────────
     df = pd.DataFrame([row])
     for col in FEATURE_COLS:
         if col not in df.columns:
@@ -262,9 +230,6 @@ def preprocess(record: dict) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# Step 3 — Load the model
-# ---------------------------------------------------------------------------
 def load_model(model_path: str):
     """Load the saved Random Forest model from disk using joblib."""
     path = Path(model_path)
@@ -283,14 +248,11 @@ def load_model(model_path: str):
     return model
 
 
-# ---------------------------------------------------------------------------
-# Step 4 — Predict and print
-# ---------------------------------------------------------------------------
 def predict(model, features: pd.DataFrame, record: dict) -> None:
-    """
-    Run the model and print the PM2.5 prediction.
+    """Run the model and print the PM2.5 prediction.
 
-    The model was trained on log1p(PM2.5), so we reverse with np.expm1().
+    The model was trained on log1p(PM2.5), so the output is reversed
+    with np.expm1().
     """
     print("\n[Step 4] Running prediction...")
 
@@ -301,7 +263,7 @@ def predict(model, features: pd.DataFrame, record: dict) -> None:
     timestamp = record.get("timestamp", record.get("observed_at", "Unknown"))
 
     who_limit = 15.0
-    status    = "✅ Below WHO guideline" if pm25_pred <= who_limit else "⚠️  Above WHO guideline"
+    status    = "Below WHO guideline" if pm25_pred <= who_limit else "Above WHO guideline"
 
     print()
     print("=" * 55)
@@ -316,12 +278,9 @@ def predict(model, features: pd.DataFrame, record: dict) -> None:
     print()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Beijing Air Quality — PM2.5 Prediction Script (Task 4)"
+        description="Beijing air quality PM2.5 prediction script (Task 4)"
     )
     parser.add_argument(
         "--source", choices=["sql", "mongo"], default="mongo",
@@ -342,25 +301,19 @@ def main():
     args = parser.parse_args()
 
     print()
-    print("Beijing Air Quality — Task 4 Prediction Script")
+    print("Beijing Air Quality - Task 4 Prediction Script")
     print("=" * 55)
     print(f"  API backend : {args.source.upper()}")
     print(f"  Model file  : {args.model}")
     print("=" * 55)
 
-    # Step 1
     if args.station and args.timestamp:
         record = fetch_by_timestamp_from_api(args.source, args.station, args.timestamp)
     else:
         record = fetch_latest_from_api(args.source)
 
-    # Step 2
     features = preprocess(record)
-
-    # Step 3
     model = load_model(args.model)
-
-    # Step 4
     predict(model, features, record)
 
 
