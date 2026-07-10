@@ -171,6 +171,8 @@ python mongo_database/queries.py
 **Schema:** 1 collection (`air_quality_readings`) — 420,768 documents, 3 indexes,
 deterministic `_id`, pre-computed `season` field.
 
+Pre-run query output is available in mongo_database/live_output.txt
+
 See `mongo_database/usage_guide.md` for Atlas cluster setup steps.
 
 ---
